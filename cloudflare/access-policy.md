@@ -1,46 +1,96 @@
-# Cloudflare Access Policy (Staging only)
+# Cloudflare Access Policy (Staging parity + Service Token testing)
 
-## Notes
-This document describes Cloudflare Access configuration to ensure:
-- **Staging is gated** by Cloudflare Access.
-- **Production is NOT gated** by Access.
-- Staging and prod otherwise behave the same (routing, caching, etc).
+## What this file is
+This documents the Cloudflare Zero Trust (Access) configuration for Dubixo **staging** so that:
+- Staging is gated by Cloudflare Access for humans/browsers.
+- Automated/manual curl verification is possible via a **Service Token**.
+- Production (when it exists) should behave the same **without** the Access gate.
 
-This file contains:
-- Where to click in Cloudflare Zero Trust
-- Recommended app + policy structure
-- Manual tests to prove staging is gated and prod is not
+## Where to configure
+Cloudflare Zero Trust dashboard:
+- Access → Applications
+- Access → Policies (Reusable policies)
+- Access → Service Auth / Service Tokens
+- Access → Logs (for debugging decisions)
 
-## Where to configure in Cloudflare UI
-Cloudflare **Zero Trust** dashboard (account-level):
-1) Open **Zero Trust** (Cloudflare One)
-2) Go to **Access → Applications**
-3) Configure the staging application
+---
 
-Reference: Cloudflare Access policies docs.
+## Current reusable policies (expected)
+Access → Policies → Reusable policies
 
-## Application: `dubixo-staging`
-**Type:** Self-hosted application  
-**Domain:** `staging.dubixo.com`  
-(Optionally include additional staging hostnames if you have them, but keep prod out.)
+### 1) `dubixo access gate policy`
+- Action: **ALLOW**
+- Purpose: human access (browser login)
+- Rules (include): email / identity-provider based allow-list(s)
+- Notes:
+  - Do NOT include service tokens in this policy.
+  - Keep this policy reusable across staging apps that need human login.
 
-### Policies (in order)
-1) **Allow** — your allowlist
-   - Include: specific email addresses and/or email domains you trust
-   - Auth method: whatever you use (Google / OTP / etc)
-2) **Deny** — everyone else
-   - Deny: `Everyone`
+### 2) `meta bypass`
+- Action: **BYPASS**
+- Purpose: publicly reachable endpoints on staging that must not be gated (only if needed)
+- Rules: path-scoped (keep narrow)
+- Notes:
+  - Only use for endpoints that must be public (e.g. very specific meta endpoints, health checks for external monitors, etc.).
+  - Avoid bypassing all of `/api/*` unless you truly want it public.
 
-## Important: webhooks / machine access (Stripe etc.)
-If you have endpoints that must be callable by Stripe or other services on staging, Access can block them.
-Two common approaches:
-- Add a **Bypass** policy for specific paths that must be publicly reachable (narrow scope).
-- Or use **Service Tokens** for machine-to-machine access (preferred when possible).
+### 3) `staging service token auth` (required for manual tests)
+- Action: **SERVICE AUTH**
+- Purpose: allow non-browser calls (curl / CI) through Access gate
+- Rules (include): **Service Token** = `staging-curl-tests-*`
+- Notes:
+  - This must be **Service Auth**, not Allow.
+  - Never commit the token secret to git.
 
-Use path-based policies if needed (Cloudflare supports app paths / policy inheritance).
+---
 
-## Manual verification (copy/paste)
-See the project ticket “INF-003 manual tests” section in the main runbook / ticket comments.
+## Applications (expected)
+Access → Applications
+
+### App: `Dubixo – Staging`
+- Type: Self-hosted
+- Domain: `staging.dubixo.com/*`
+- Policies in order (top to bottom):
+  1) `staging service token auth` (SERVICE AUTH)  ← allows curl/CI with headers
+  2) `dubixo access gate policy` (ALLOW)          ← allows humans after login
+  (Optional) deny policy below if you use one
+
+Expected behaviour:
+- Unauthenticated browser / curl without token → **302 redirect** to `dubixo.cloudflareaccess.com/...` (Access login)
+- Curl with service token headers → origin reachable (HTTP 200 from the app)
+
+### App: `Dubixo Public Meta API` (optional)
+- Type: Self-hosted
+- Domain: `staging.dubixo.com/api/...` (path-scoped)
+- Policy: `meta bypass` (BYPASS)
+- Notes:
+  - Ensure the path here is tighter than `/api/*` unless you want the entire API public.
+
+### Temporary app used for debugging (should be deleted)
+- `Dubixo – Token Test Health` (`staging.dubixo.com/api/health`)
+- Used to isolate whether service tokens are accepted.
+- Delete after confirming Service Auth works.
+
+---
+
+## Service Token used for manual tests
+Access → Service Auth / Service Tokens
+
+- Name: `staging-curl-tests-YYYY-MM`
+- Duration: 1 year (smallest available in UI)
+- Rotation: rotate at least yearly, and immediately if accidentally exposed.
+
+### Curl header format (do not paste secrets into tickets or git)
+- `CF-Access-Client-Id: <client_id>`
+- `CF-Access-Client-Secret: <client_secret>`
+
+---
+
+## Manual verification (staging)
+### 1) Access blocks unauthorised users (no token)
+```bash
+HOST="staging.dubixo.com"
+curl -sI "https://${HOST}/api/health" | egrep -i 'HTTP/|location'
 
 Service token: staging-curl-tests-2025-12
 
